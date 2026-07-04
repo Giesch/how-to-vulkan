@@ -1,8 +1,10 @@
 #![allow(unsafe_code, unused_variables)]
 
 use std::ffi::CString;
+use std::path::PathBuf;
 
 use ash::vk;
+use glam::{Vec2, Vec3};
 use sdl3::Sdl;
 use sdl3::video::Window;
 use vk_mem::Alloc;
@@ -31,7 +33,13 @@ fn init_window() -> Result<(Sdl, Window), Box<dyn std::error::Error>> {
     Ok((sdl, window))
 }
 
-struct Renderer;
+struct Renderer {
+    device: ash::Device,
+    allocator: vk_mem::Allocator,
+    depth_image: vk::Image,
+    depth_image_view: vk::ImageView,
+    depth_image_allocation: vk_mem::Allocation,
+}
 
 impl Renderer {
     fn init(window: Window) -> Result<Self, Box<dyn std::error::Error>> {
@@ -210,8 +218,34 @@ impl Renderer {
             );
         let depth_image_view = unsafe { device.create_image_view(&depth_view_create_info, None)? };
 
-        Ok(Self)
+        let (verticies, indicies) = load_obj_verticies()?;
+
+        Ok(Self {
+            device,
+            allocator,
+            depth_image,
+            depth_image_view,
+            depth_image_allocation,
+        })
     }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        unsafe {
+            self.device.destroy_image_view(self.depth_image_view, None);
+            self.allocator
+                .destroy_image(self.depth_image, &mut self.depth_image_allocation);
+        }
+    }
+}
+
+// https://www.howtovulkan.com/#loading-meshes
+#[repr(C, align(16))]
+struct Vertex {
+    position: Vec3,
+    normal: Vec3,
+    uv: Vec2,
 }
 
 fn device_name_as_string(props: vk::PhysicalDeviceProperties2) -> String {
@@ -224,4 +258,53 @@ fn device_name_as_string(props: vk::PhysicalDeviceProperties2) -> String {
         .collect();
 
     String::from_utf8_lossy(&device_name_bytes).to_string()
+}
+
+// From unknownue's rust version of the original vulkan tutorial
+// https://github.com/unknownue/vulkan-tutorial-rust/blob/master/src/tutorials/27_model_loading.rs
+fn load_obj_verticies() -> Result<(Vec<Vertex>, Vec<u32>), tobj::LoadError> {
+    let file_path: PathBuf = [env!("CARGO_MANIFEST_DIR"), "assets", "suzanne.obj"]
+        .iter()
+        .collect();
+
+    let (mut models, _materials) = tobj::load_obj(file_path, &tobj::GPU_LOAD_OPTIONS)?;
+
+    debug_assert!(models.len() == 1);
+    let model = models.remove(0);
+
+    let mut vertices = vec![];
+    let mesh = model.mesh;
+    let vertices_count = mesh.positions.len() / 3;
+    for i in 0..vertices_count {
+        let vec3_offset = i * 3;
+        let position = Vec3::new(
+            mesh.positions[vec3_offset],
+            mesh.positions[vec3_offset + 1],
+            mesh.positions[vec3_offset + 2],
+        );
+        let normal = Vec3::new(
+            mesh.normals[vec3_offset],
+            mesh.normals[vec3_offset + 1],
+            mesh.normals[vec3_offset + 2],
+        );
+
+        let uv = {
+            let offset = i * 2;
+            let u = mesh.texcoords[offset];
+            // in obj, 0 is the bottom, in vulkan, 0 is the top
+            // (for texture coordinates)
+            let v = 1.0 - mesh.texcoords[offset + 1];
+            Vec2::new(u, v)
+        };
+
+        let vertex = Vertex {
+            position,
+            normal,
+            uv,
+        };
+
+        vertices.push(vertex);
+    }
+
+    Ok((vertices, mesh.indices))
 }
