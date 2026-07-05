@@ -39,6 +39,8 @@ struct Renderer {
     depth_image: vk::Image,
     depth_image_view: vk::ImageView,
     depth_image_allocation: vk_mem::Allocation,
+    vi_buffer: vk::Buffer,
+    vi_buffer_allocation: vk_mem::Allocation,
 }
 
 impl Renderer {
@@ -81,6 +83,7 @@ impl Renderer {
         }
 
         // select physical device
+        // https://www.howtovulkan.com/#device-selection
         let physical_device = physical_devices[DISCRETE_NVIDIA_GPU_INDEX_ON_MY_LAPTOP];
         let device_name = {
             let mut device_properties = vk::PhysicalDeviceProperties2::default();
@@ -92,6 +95,7 @@ impl Renderer {
         println!("Selected device: {device_name}");
 
         // graphics queue
+        // https://www.howtovulkan.com/#queues
         let queue_families =
             unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
         let queue_family = queue_families
@@ -127,11 +131,13 @@ impl Renderer {
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
 
         // vulkan memory allocator
+        // https://www.howtovulkan.com/#setting-up-vma
         let allocator_create_info =
             vk_mem::AllocatorCreateInfo::new(&instance, &device, physical_device);
         let allocator = unsafe { vk_mem::Allocator::new(allocator_create_info)? };
 
         // SDL surface
+        // https://www.howtovulkan.com/#window-and-surface
         let surface_ext = ash::khr::surface::Instance::new(&entry, &instance);
         let surface = window.vulkan_create_surface(instance.handle())?;
         let surface_capabilities = unsafe {
@@ -140,6 +146,7 @@ impl Renderer {
         let swapchain_extent = surface_capabilities.current_extent;
 
         // swapchain
+        // https://www.howtovulkan.com/#swapchain
         let image_format = vk::Format::B8G8R8A8_SRGB;
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface)
@@ -158,6 +165,7 @@ impl Renderer {
         let swapchain_images = unsafe { swapchain_device_ext.get_swapchain_images(swapchain)? };
 
         // depth attachment
+        // https://www.howtovulkan.com/#depth-attachment
         let mut depth_format: Option<vk::Format> = None;
         let possible_depth_formats = [
             vk::Format::D32_SFLOAT_S8_UINT,
@@ -172,11 +180,11 @@ impl Renderer {
                     &mut props,
                 )
             };
-            if props
+            let device_supports_depth_format = props
                 .format_properties
                 .optimal_tiling_features
-                .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT)
-            {
+                .contains(vk::FormatFeatureFlags::DEPTH_STENCIL_ATTACHMENT);
+            if device_supports_depth_format {
                 depth_format = Some(possible_depth_format);
                 break;
             }
@@ -199,13 +207,13 @@ impl Renderer {
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
             .initial_layout(vk::ImageLayout::UNDEFINED);
-        let alloc_info = vk_mem::AllocationCreateInfo {
+        let depth_alloc_info = vk_mem::AllocationCreateInfo {
             flags: vk_mem::AllocationCreateFlags::DEDICATED_MEMORY,
             usage: vk_mem::MemoryUsage::Auto,
             ..Default::default()
         };
         let (depth_image, depth_image_allocation) =
-            unsafe { allocator.create_image(&depth_image_create_info, &alloc_info)? };
+            unsafe { allocator.create_image(&depth_image_create_info, &depth_alloc_info)? };
         let depth_view_create_info = vk::ImageViewCreateInfo::default()
             .image(depth_image)
             .view_type(vk::ImageViewType::TYPE_2D)
@@ -218,7 +226,36 @@ impl Renderer {
             );
         let depth_image_view = unsafe { device.create_image_view(&depth_view_create_info, None)? };
 
-        let (verticies, indicies) = load_obj_verticies()?;
+        // vertex/index buffer
+        // https://www.howtovulkan.com/#loading-meshes
+        let (verticies, indicies) = load_obj()?;
+        // NOTE the as_slice() calls here are necessary to avoid counting the vec header
+        let verts_size = std::mem::size_of_val(verticies.as_slice());
+        let indicies_size = std::mem::size_of_val(indicies.as_slice());
+        let buffer_size = verts_size + indicies_size;
+        let buffer_create_info = vk::BufferCreateInfo::default()
+            .size(buffer_size as u64)
+            .usage(vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::INDEX_BUFFER)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let vert_alloc_create_info = vk_mem::AllocationCreateInfo {
+            flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
+                | vk_mem::AllocationCreateFlags::HOST_ACCESS_ALLOW_TRANSFER_INSTEAD
+                | vk_mem::AllocationCreateFlags::MAPPED,
+            usage: vk_mem::MemoryUsage::Auto,
+            ..Default::default()
+        };
+        let (vi_buffer, vi_buffer_allocation) =
+            unsafe { allocator.create_buffer(&buffer_create_info, &vert_alloc_create_info)? };
+        let mapped_vi_buffer = allocator
+            .get_allocation_info(&vi_buffer_allocation)
+            .mapped_data;
+        unsafe {
+            std::slice::from_raw_parts_mut(mapped_vi_buffer as *mut Vertex, verticies.len())
+                .copy_from_slice(&verticies);
+            let indicies_start = mapped_vi_buffer.add(verts_size) as *mut u32;
+            std::slice::from_raw_parts_mut(indicies_start, indicies.len())
+                .copy_from_slice(&indicies);
+        }
 
         Ok(Self {
             device,
@@ -226,6 +263,8 @@ impl Renderer {
             depth_image,
             depth_image_view,
             depth_image_allocation,
+            vi_buffer,
+            vi_buffer_allocation,
         })
     }
 }
@@ -236,12 +275,16 @@ impl Drop for Renderer {
             self.device.destroy_image_view(self.depth_image_view, None);
             self.allocator
                 .destroy_image(self.depth_image, &mut self.depth_image_allocation);
+
+            self.allocator
+                .destroy_buffer(self.vi_buffer, &mut self.vi_buffer_allocation);
         }
     }
 }
 
 // https://www.howtovulkan.com/#loading-meshes
 #[repr(C, align(16))]
+#[derive(Clone, Copy)]
 struct Vertex {
     position: Vec3,
     normal: Vec3,
@@ -262,7 +305,7 @@ fn device_name_as_string(props: vk::PhysicalDeviceProperties2) -> String {
 
 // From unknownue's rust version of the original vulkan tutorial
 // https://github.com/unknownue/vulkan-tutorial-rust/blob/master/src/tutorials/27_model_loading.rs
-fn load_obj_verticies() -> Result<(Vec<Vertex>, Vec<u32>), tobj::LoadError> {
+fn load_obj() -> Result<(Vec<Vertex>, Vec<u32>), tobj::LoadError> {
     let file_path: PathBuf = [env!("CARGO_MANIFEST_DIR"), "assets", "suzanne.obj"]
         .iter()
         .collect();
