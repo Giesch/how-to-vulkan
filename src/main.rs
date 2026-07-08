@@ -4,11 +4,12 @@ use std::ffi::CString;
 use std::path::PathBuf;
 
 use ash::vk;
-use glam::{Vec2, Vec3};
+use glam::{Mat4, Vec2, Vec3, Vec4};
 use sdl3::Sdl;
 use sdl3::video::Window;
 use vk_mem::Alloc;
 
+const MAX_FRAMES_IN_FLIGHT: usize = 2;
 const DISCRETE_NVIDIA_GPU_INDEX_ON_MY_LAPTOP: usize = 1;
 const LOG_ALL_AVAILABLE_DEVICES: bool = false;
 
@@ -41,6 +42,8 @@ struct Renderer {
     depth_image_allocation: vk_mem::Allocation,
     vi_buffer: vk::Buffer,
     vi_buffer_allocation: vk_mem::Allocation,
+    shader_data_buffers: [ShaderDataBuffer; MAX_FRAMES_IN_FLIGHT],
+    // command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT],
 }
 
 impl Renderer {
@@ -132,8 +135,9 @@ impl Renderer {
 
         // vulkan memory allocator
         // https://www.howtovulkan.com/#setting-up-vma
-        let allocator_create_info =
+        let mut allocator_create_info =
             vk_mem::AllocatorCreateInfo::new(&instance, &device, physical_device);
+        allocator_create_info.flags = vk_mem::AllocatorCreateFlags::BUFFER_DEVICE_ADDRESS;
         let allocator = unsafe { vk_mem::Allocator::new(allocator_create_info)? };
 
         // SDL surface
@@ -257,6 +261,35 @@ impl Renderer {
                 .copy_from_slice(&indicies);
         }
 
+        let mut shader_data_buffers = vec![];
+        for f in 0..MAX_FRAMES_IN_FLIGHT {
+            let buffer_create_info = vk::BufferCreateInfo::default()
+                .size(size_of::<ShaderData>() as u64)
+                .usage(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+            let alloc_create_info = vk_mem::AllocationCreateInfo {
+                flags: vk_mem::AllocationCreateFlags::HOST_ACCESS_SEQUENTIAL_WRITE
+                    | vk_mem::AllocationCreateFlags::HOST_ACCESS_ALLOW_TRANSFER_INSTEAD
+                    | vk_mem::AllocationCreateFlags::MAPPED,
+                usage: vk_mem::MemoryUsage::Auto,
+                ..Default::default()
+            };
+            let (buffer, allocation) =
+                unsafe { allocator.create_buffer(&buffer_create_info, &alloc_create_info)? };
+
+            let bda_info = vk::BufferDeviceAddressInfo::default().buffer(buffer);
+            let device_address = unsafe { device.get_buffer_device_address(&bda_info) };
+
+            shader_data_buffers.push(ShaderDataBuffer {
+                buffer,
+                allocation,
+                device_address,
+            });
+        }
+        let shader_data_buffers: [ShaderDataBuffer; MAX_FRAMES_IN_FLIGHT] =
+            shader_data_buffers.try_into().unwrap();
+
+        let command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT];
+
         Ok(Self {
             device,
             allocator,
@@ -265,6 +298,8 @@ impl Renderer {
             depth_image_allocation,
             vi_buffer,
             vi_buffer_allocation,
+            shader_data_buffers,
+            // command_buffers,
         })
     }
 }
@@ -278,11 +313,34 @@ impl Drop for Renderer {
 
             self.allocator
                 .destroy_buffer(self.vi_buffer, &mut self.vi_buffer_allocation);
+
+            for shader_data_buffer in &mut self.shader_data_buffers {
+                self.allocator.destroy_buffer(
+                    shader_data_buffer.buffer,
+                    &mut shader_data_buffer.allocation,
+                );
+            }
         }
     }
 }
 
-// https://www.howtovulkan.com/#loading-meshes
+#[derive(Debug)]
+struct ShaderDataBuffer {
+    buffer: vk::Buffer,
+    allocation: vk_mem::Allocation,
+    device_address: vk::DeviceAddress,
+}
+
+#[repr(C, align(16))]
+struct ShaderData {
+    projection: Mat4,
+    view: Mat4,
+    model: [Mat4; 3],
+    // 0.0, -10.0, 10.0, 0.0
+    light_pos: Vec4,
+    selected: usize,
+}
+
 #[repr(C, align(16))]
 #[derive(Clone, Copy)]
 struct Vertex {
