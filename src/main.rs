@@ -43,6 +43,9 @@ struct Renderer {
     vi_buffer: vk::Buffer,
     vi_buffer_allocation: vk_mem::Allocation,
     shader_data_buffers: [ShaderDataBuffer; MAX_FRAMES_IN_FLIGHT],
+    fences: [vk::Fence; MAX_FRAMES_IN_FLIGHT],
+    image_acquired_semaphores: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT],
+    render_complete_semaphores: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT],
     // command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT],
 }
 
@@ -288,7 +291,30 @@ impl Renderer {
         let shader_data_buffers: [ShaderDataBuffer; MAX_FRAMES_IN_FLIGHT] =
             shader_data_buffers.try_into().unwrap();
 
-        let command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT];
+        // https://www.howtovulkan.com/#synchronization-objects
+        let semaphore_create_info = vk::SemaphoreCreateInfo::default();
+        let fence_create_info =
+            vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
+        let mut fences = vec![];
+        let mut image_acquired_semaphores = vec![];
+        for _ in 0..MAX_FRAMES_IN_FLIGHT {
+            let semaphore = unsafe { device.create_semaphore(&semaphore_create_info, None)? };
+            let fence = unsafe { device.create_fence(&fence_create_info, None)? };
+            fences.push(fence);
+            image_acquired_semaphores.push(semaphore);
+        }
+        let mut render_complete_semaphores = vec![];
+        for _ in 0..render_complete_semaphores.len() {
+            let semaphore = unsafe { device.create_semaphore(&semaphore_create_info, None)? };
+            render_complete_semaphores.push(semaphore);
+        }
+        let fences: [vk::Fence; MAX_FRAMES_IN_FLIGHT] = fences.try_into().unwrap();
+        let image_acquired_semaphores: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT] =
+            image_acquired_semaphores.try_into().unwrap();
+        let render_complete_semaphores: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT] =
+            render_complete_semaphores.try_into().unwrap();
+
+        // let command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT];
 
         Ok(Self {
             device,
@@ -299,6 +325,9 @@ impl Renderer {
             vi_buffer,
             vi_buffer_allocation,
             shader_data_buffers,
+            fences,
+            image_acquired_semaphores,
+            render_complete_semaphores,
             // command_buffers,
         })
     }
