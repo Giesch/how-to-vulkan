@@ -46,7 +46,7 @@ struct Renderer {
     fences: [vk::Fence; MAX_FRAMES_IN_FLIGHT],
     image_acquired_semaphores: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT],
     render_complete_semaphores: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT],
-    // command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT],
+    command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT],
 }
 
 impl Renderer {
@@ -314,7 +314,18 @@ impl Renderer {
         let render_complete_semaphores: [vk::Semaphore; MAX_FRAMES_IN_FLIGHT] =
             render_complete_semaphores.try_into().unwrap();
 
-        // let command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT];
+        // https://www.howtovulkan.com/#command-buffers
+        let command_buffer_create_info = vk::CommandPoolCreateInfo::default()
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+            .queue_family_index(queue_family);
+        let command_pool =
+            unsafe { device.create_command_pool(&command_buffer_create_info, None)? };
+        let command_buffer_alloc_ci = vk::CommandBufferAllocateInfo::default()
+            .command_pool(command_pool)
+            .command_buffer_count(MAX_FRAMES_IN_FLIGHT as u32);
+        let command_buffers = unsafe { device.allocate_command_buffers(&command_buffer_alloc_ci)? };
+        let command_buffers: [vk::CommandBuffer; MAX_FRAMES_IN_FLIGHT] =
+            command_buffers.try_into().unwrap();
 
         Ok(Self {
             device,
@@ -328,7 +339,7 @@ impl Renderer {
             fences,
             image_acquired_semaphores,
             render_complete_semaphores,
-            // command_buffers,
+            command_buffers,
         })
     }
 }
